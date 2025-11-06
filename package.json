@@ -1,0 +1,13 @@
+
+{
+  "name": "match-server",
+  "version": "1.0.0",
+  "description": "Rastgele Sesli Eşleşme Sunucusu",
+  "main": "match_server.js",
+  "scripts": {
+    "start": "node match_server.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.5"
+  }
+}
