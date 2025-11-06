@@ -1,13 +1,12 @@
 
 // Bu dosyanın adı: match_server.js
-// SADECE RASTGELE SESLİ EŞLEŞME (lythar) SİSTEMİNİN SANTRALİ
-// (Yeni Render.com hesabında çalışacak)
+// SADECE RASTGELE EŞLEŞME (AZAR) SİSTEMİNİN SANTRALİ
+// 🔥 GÜNCELLEME: "Yarış Durumu" (Race Condition) hatası çözüldü.
 
 const { Server } = require("socket.io");
 const http = require('http'); 
 
 const httpServer = http.createServer((req, res) => {
-  // Render.com sağlık kontrolü (health check)
   if (req.method === 'GET' && req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Rastgele Sesli Eşleşme Sunucusu Aktif.');
@@ -18,53 +17,60 @@ const httpServer = http.createServer((req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-const HOST = '0.0.0.0'; // Tüm IP adreslerini dinle
+const HOST = '0.0.0.0'; 
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", // Buraya ana sitenin (lythar.42web.io) adresini yazmalısın
+    origin: "*", 
     methods: ["GET", "POST"]
   }
 });
 
 console.log(`🚀 Rastgele Sesli Sunucusu ${PORT} portunda dinlemeye hazır...`);
 
-let kullaniciSoketleri = new Map(); // key: userId, value: socket.id
+// 🔥 GÜNCELLEME: Map'i (Soket -> UserID) ve (UserID -> Soket) olarak iki yönlü tutacağız
+let socketToUser = new Map(); // key: socket.id, value: userId
+let userToSocket = new Map(); // key: userId, value: socket.id
 let waitingPool = []; // [{ userId: '123', socketId: 'abc' }, ...]
 
 io.on("connection", (socket) => {
   console.log(`[BAĞLANTI] Bir kullanıcı bağlandı: ${socket.id}`);
-  let currentUserId = null; 
 
   // 1. KULLANICI KİMLİĞİNİ KAYDETME
   socket.on("store_user_id", (userId) => {
     if (!userId) return;
     const userIdStr = userId.toString();
-    currentUserId = userIdStr;
+    
     console.log(`[KİMLİK] Kullanıcı ${userIdStr} soket ${socket.id} ile eşleşti.`);
-    kullaniciSoketleri.set(userIdStr, socket.id);
+    socketToUser.set(socket.id, userIdStr);
+    userToSocket.set(userIdStr, socket.id);
   });
 
   // 2. EŞLEŞME HAVUZUNA KATIL
   socket.on("join_matchmaking_pool", () => {
-    if (!currentUserId) {
-        console.warn("[HATA] Kimliği belirsiz bir soket havuza girmeye çalıştı.");
-        return;
-    }
-    if (waitingPool.find(user => user.userId === currentUserId)) {
-        console.log(`[HAVUZ] Kullanıcı ${currentUserId} zaten havuzda.`);
+    // 🔥 DÜZELTME: 'currentUserId' yerine 'socketToUser' map'ini kullan
+    const userId = socketToUser.get(socket.id);
+    
+    if (!userId) {
+        console.warn(`[HATA] ${socket.id} kimliği belirsiz bir soket havuza girmeye çalıştı. (store_user_id bekleniyor)`);
+        // İsteği reddet (veya 1 saniye sonra tekrar denemesini iste)
         return;
     }
     
-    console.log(`[HAVUZ] Kullanıcı ${currentUserId} (${socket.id}) havuza eklendi.`);
-    waitingPool.push({ userId: currentUserId, socketId: socket.id });
+    if (waitingPool.find(user => user.userId === userId)) {
+        console.log(`[HAVUZ] Kullanıcı ${userId} zaten havuzda.`);
+        return;
+    }
+    
+    console.log(`[HAVUZ] Kullanıcı ${userId} (${socket.id}) havuza eklendi.`);
+    waitingPool.push({ userId: userId, socketId: socket.id });
 
     // EŞLEŞMEYİ KONTROL ET
     if (waitingPool.length >= 2) {
         console.log("[HAVUZ] Eşleşme bulundu! 2 kullanıcı çekiliyor...");
         
-        const userA = waitingPool.shift(); // Havuza ilk giren (Arayan olacak)
-        const userB = waitingPool.shift(); // Havuza ikinci giren (Aranan olacak)
+        const userA = waitingPool.shift(); 
+        const userB = waitingPool.shift(); 
 
         // Arayan (isCaller=true)
         io.to(userA.socketId).emit("match_found", { 
@@ -84,14 +90,16 @@ io.on("connection", (socket) => {
 
   // 3. EŞLEŞME HAVUZUNDAN AYRIL
   socket.on("leave_matchmaking_pool", () => {
-    if (!currentUserId) return;
-    waitingPool = waitingPool.filter(user => user.userId !== currentUserId);
-    console.log(`[HAVUZ] Kullanıcı ${currentUserId} havuzdan ayrıldı.`);
+    const userId = socketToUser.get(socket.id);
+    if (!userId) return;
+    
+    waitingPool = waitingPool.filter(user => user.userId !== userId);
+    console.log(`[HAVUZ] Kullanıcı ${userId} havuzdan ayrıldı.`);
   });
 
   // 4. WEBRTC SİNYAL İLETİMİ
   socket.on("send_signal", (data) => {
-    const receiverSocketId = kullaniciSoketleri.get(data.receiver_id.toString());
+    const receiverSocketId = userToSocket.get(data.receiver_id.toString());
     if (receiverSocketId) {
       console.log(`[SİNYAL] ${data.payload.type} sinyali ${data.receiver_id}'a iletiliyor.`);
       io.to(receiverSocketId).emit("incoming_signal", {
@@ -102,34 +110,26 @@ io.on("connection", (socket) => {
 
   // 5. ARAMA KAPATMA
   socket.on("send_hangup", (data) => {
-    const receiverSocketId = kullaniciSoketleri.get(data.receiver_id.toString());
+    const receiverSocketId = userToSocket.get(data.receiver_id.toString());
     if (receiverSocketId) {
       console.log(`[KAPAT] ${data.receiver_id}'a kapatma sinyali iletiliyor.`);
       io.to(receiverSocketId).emit("call_ended_by_peer");
     }
   });
 
-  // 🔥 YENİ: 6. EMOJİ REAKSİYONU (20:09)
-  socket.on("send_emoji_reaction", (data) => {
-    const receiverSocketId = kullaniciSoketleri.get(data.receiver_id.toString());
-    if (receiverSocketId) {
-        console.log(`[EMOJI] ${currentUserId} -> ${data.receiver_id}'a emoji gönderdi: ${data.emoji}`);
-        io.to(receiverSocketId).emit("emoji_reaction_received", {
-            emoji: data.emoji
-        });
-    }
-  });
-
-  // 7. BAĞLANTI KOPMASI
+  // 6. BAĞLANTI KOPMASI
   socket.on("disconnect", () => {
     console.log(`[BAĞLANTI KESİLDİ] Kullanıcı ayrıldı: ${socket.id}`);
     
-    if (currentUserId) {
-        kullaniciSoketleri.delete(currentUserId);
-        console.log(`[KİMLİK] Kullanıcı ${currentUserId} eşleşmesi kaldırıldı.`);
+    const userId = socketToUser.get(socket.id);
+    
+    if (userId) {
+        socketToUser.delete(socket.id);
+        userToSocket.delete(userId);
+        console.log(`[KİMLİK] Kullanıcı ${userId} eşleşmesi kaldırıldı.`);
         
-        waitingPool = waitingPool.filter(user => user.userId !== currentUserId);
-        console.log(`[HAVUZ] Kullanıcı ${currentUserId} (bağlantı koptu) havuzdan silindi.`);
+        waitingPool = waitingPool.filter(user => user.userId !== userId);
+        console.log(`[HAVUZ] Kullanıcı ${userId} (bağlantı koptu) havuzdan silindi.`);
     }
   });
 });
